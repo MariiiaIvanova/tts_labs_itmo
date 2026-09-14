@@ -22,8 +22,7 @@ import pandas as pd
 from text_filter import TextFilter
 from text_normalizer import TextNormalizer
 
-#INPUT_PATH = "../../data/RUSLAN/metadata_RUSLAN_22200.csv"
-INPUT_PATH = "/mnt/storage/work_dir/databases/ruslan/ruslan_dataset/metadata_RUSLAN_22200.csv"
+INPUT_PATH = "../../data/RUSLAN/metadata_RUSLAN_22200.csv"
 OUTPUT_PATH = "../../data/metadata_RUSLAN_22200_normalized.csv"
 
 # quoting=csv.QUOTE_NONE is required in both directions: the corpus text contains

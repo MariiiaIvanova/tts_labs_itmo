@@ -1,23 +1,30 @@
-"""Grapheme-to-phoneme front end — skeleton for lab 3.
+"""Grapheme-to-phoneme front end — lab 3.
 
-Run as a script to score the module on the prepared data::
+Запуск как скрипта для оценки модуля на подготовленных данных::
 
     python g2p.py
 
-Two phone error rates are reported on the split carried in the data's own `set` column: PER over
-whole `test` utterances — the front end as lab 5 will run it — and PER over `test` tokens
-absent from the training lexicon, which is the out-of-vocabulary model alone.
+Считаются две метрики на test-части (по колонке `set`):
+- PER на целых предложениях — как модуль будет работать в лабе 5;
+- PER на OOV-токенах (которых нет в обучающем лексиконе) — качество
+  собственно модели транскрипции.
 """
+from __future__ import annotations
+
 import csv
 import unicodedata
 from collections import Counter, defaultdict
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
 import tqdm
 
-TOKENS_PHONES_DATA = 'data/tokens_phones.csv'
+from rules import transcribe_oov
 
+TOKENS_PHONES_DATA = 'data/tokens_phones.csv'
+LEXICON_PATH = 'data/lexicon.csv'
+MFA_DICT_PATH = 'data/russian_mfa_norm.dict'
 
 SIL = '<SIL>'
 
@@ -25,54 +32,46 @@ SIL = '<SIL>'
 class G2P:
     """Turns a sentence into a phone sequence.
 
-    Input is one sentence as the token sequence lab 2 produces: words without punctuation,
-    with ``"<SIL>"`` wherever the pause predictor placed a pause::
+    Вход — последовательность токенов одного предложения (без пунктуации,
+    с ``"<SIL>"`` на месте пауз).
 
-        ["я", "вышел", "из", "дома", <SIL>, "когда", "стемнело"]
-
-    Punctuation is gone by this point on purpose — its only role in the pipeline is to
-    predict pauses, which lab 2 has already done.
-
-
-    Args:
-        lexicon: `word -> Counter({phones: count})` as written by `prepare_lexicon.py`.
-            Pronunciations are space-separated NFC strings. Keys are lowercase and carry no
-            stress mark, so look words up accordingly.
+    Аргументы:
+        lexicon: `word -> Counter({phones: count})` из `prepare_lexicon.py`.
+        mfa_dict: `word -> phones` из `russian_mfa_norm.dict`.
     """
 
-    def __init__(self, lexicon: dict[str, Counter] | None = None) -> None:
+    def __init__(self,
+                 lexicon: Optional[Dict[str, Counter]] = None,
+                 mfa_dict: Optional[Dict[str, str]] = None) -> None:
         self.lexicon = lexicon or {}
+        self.mfa_dict = mfa_dict or {}
 
-    def transcribe(self, tokens: list[str] | np.ndarray) -> list[list[str]]:
-        """Transcribe each token of one sentence.
+    def _transcribe_token(self, token: str) -> List[str]:
+        # <SIL> проходит неизменным — контракт transcribe.
+        if token == SIL:
+            return [SIL]
+        # 1) обучающий лексикон — самое частое произношение
+        if token in self.lexicon:
+            best = self.lexicon[token].most_common(1)[0][0]
+            return best.split()
+        # 2) внешний MFA-словарь
+        if token in self.mfa_dict:
+            return self.mfa_dict[token].split()
+        # 3) OOV: наивные правила графем → фонем
+        return transcribe_oov(token)
 
-        Args:
-            tokens: Tokens of one sentence in order, possibly including ``"<SIL>"``.
+    def transcribe(self, tokens: Union[List[str], np.ndarray]) -> List[List[str]]:
+        """Транскрибирует каждый токен одного предложения.
 
-        Returns:
-            One phone list per input token, so that `len(result) == len(tokens)`. A token
-            may map to an empty list, but the outer length must be preserved: the
-            evaluation scores in-vocabulary, dictionary and residual tokens separately and
-            needs to know which output belongs to which token. ``"<SIL>"`` maps to
-            ``["<SIL>"]``.
-
+        Возвращает список такой же длины, что и вход: один список фонем
+        на каждый входной токен. ``"<SIL>"`` → ``["<SIL>"]``.
         """
-        return [[SIL] if token == SIL else [] for token in tokens]
+        return [self._transcribe_token(t) for t in tokens]
 
 
-def phone_error_rate(reference: list[list[str]], hypothesis: list[list[str]]) -> float:
-    """Corpus-level PER: summed edit distance over summed reference length.
-
-    Summing before dividing weights every phone equally. Averaging per-sentence rates
-    would instead weight every sentence equally and let short sentences dominate.
-
-    Args:
-        reference: Reference phone sequences.
-        hypothesis: Predicted phone sequences, same length and order.
-
-    Returns:
-        Phone error rate, or `nan` when the reference is empty.
-    """
+def phone_error_rate(reference: List[List[str]],
+                     hypothesis: List[List[str]]) -> float:
+    """Корпусный PER: сумма edit distance / сумма длин эталона."""
     total_distance = 0
     total_length = 0
     for ref, hyp in zip(reference, hypothesis):
@@ -92,60 +91,59 @@ def phone_error_rate(reference: list[list[str]], hypothesis: list[list[str]]) ->
     return total_distance / total_length if total_length else float('nan')
 
 
-def word_accuracy(reference: list[list[str]], hypothesis: list[list[str]]) -> float:
-    """Fraction of words whose whole phone sequence is exactly right."""
+def word_accuracy(reference: List[List[str]],
+                  hypothesis: List[List[str]]) -> float:
+    """Доля слов, чья последовательность фонем угадана целиком."""
     if not reference:
         return float('nan')
     return float(np.mean([ref == hyp for ref, hyp in zip(reference, hypothesis)]))
 
 
 def load_tokens(path: str = TOKENS_PHONES_DATA) -> pd.DataFrame:
-    """Read the training table and drop tokens with no reference transcription.
-
-    Rows whose phones are empty or contain `spn` carry no reference and are removed.
-
-    The `set` column comes with the file. It is a rule on the utterance id — test iff the
-    number divides by 5
-
-    Args:
-        path: Path to the table written by `prepare_lexicon.py`.
-
-    Returns:
-        The table with `token` and `phones` as NFC strings, in sentence order.
-    """
+    """Читает таблицу токенов и выкидывает строки без эталонной транскрипции."""
     tokens = pd.read_csv(path, sep='|', quoting=csv.QUOTE_NONE)
-    tokens['token'] = tokens.token.astype(str).map(lambda s: unicodedata.normalize('NFC', s))
+    tokens['token'] = tokens.token.astype(str).map(
+        lambda s: unicodedata.normalize('NFC', s))
     tokens['phones'] = tokens.phones.fillna('').astype(str)
-
-    unpronounced = (tokens.phones == '') | tokens.phones.str.split().map(lambda p: 'spn' in p)
+    unpronounced = (tokens.phones == '') | tokens.phones.str.split().map(
+        lambda p: 'spn' in p)
     print(f'dropping {unpronounced.sum()} tokens without a transcription '
           f'({unpronounced.mean():.2%})')
     return tokens[~unpronounced].reset_index(drop=True)
 
 
-def build_lexicon(tokens: pd.DataFrame) -> dict[str, Counter]:
-    """Count pronunciations per token type over the given rows.
-    """
-    lexicon: dict[str, Counter] = defaultdict(Counter)
+def build_lexicon(tokens: pd.DataFrame) -> Dict[str, Counter]:
+    """Считает произношения per token type на переданных строках."""
+    lexicon: Dict[str, Counter] = defaultdict(Counter)
     for token, phones in tokens[['token', 'phones']].values:
         lexicon[token][phones] += 1
     return lexicon
 
 
-def calc_metrics(g2p: G2P, tokens: pd.DataFrame, lexicon: dict[str, Counter]) -> None:
-    """Print running-text PER, and PER and word accuracy on out-of-vocabulary tokens.
+def load_mfa_dict(path: str = MFA_DICT_PATH) -> Dict[str, str]:
+    """Читает russian_mfa_norm.dict: word -> phones (tab-separated)."""
+    out = {}
+    with open(path, encoding='utf-8') as fh:
+        for line in fh:
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) != 2:
+                continue
+            word, phones = parts
+            if phones.strip() == 'spn':
+                continue
+            out[word] = phones
+    return out
 
-    Args:
-        g2p: The module under test.
-        tokens: One fold of the table from :func:`load_tokens`, in sentence order.
-        lexicon: The training lexicon, used only to tell in-vocabulary tokens from OOV.
-    """
-    sentence_ref: list[list[str]] = []
-    sentence_hyp: list[list[str]] = []
-    oov_ref: list[list[str]] = []
-    oov_hyp: list[list[str]] = []
-    in_vocab_ref: list[list[str]] = []
-    in_vocab_hyp: list[list[str]] = []
+
+def calc_metrics(g2p: G2P, tokens: pd.DataFrame,
+                 lexicon: Dict[str, Counter]) -> None:
+    """Печатает running-text PER и PER/word accuracy на OOV-токенах."""
+    sentence_ref: List[List[str]] = []
+    sentence_hyp: List[List[str]] = []
+    oov_ref: List[List[str]] = []
+    oov_hyp: List[List[str]] = []
+    in_vocab_ref: List[List[str]] = []
+    in_vocab_hyp: List[List[str]] = []
 
     for _, sentence in tqdm.tqdm(tokens.groupby('id', sort=False)):
         sentence = sentence.sort_values('token_id')
@@ -156,9 +154,7 @@ def calc_metrics(g2p: G2P, tokens: pd.DataFrame, lexicon: dict[str, Counter]) ->
                              f'for {len(words)} tokens')
         reference = [p.split() for p in sentence.phones.values]
 
-        # <SIL> is stripped before scoring on both sides. Leaving it in would grade lab 2's
-        # pause placement inside lab 3's metric. It is still passed through at runtime --
-        # see :meth:`G2P.transcribe`.
+        # <SIL> убираем с обеих сторон перед подсчётом.
         sentence_ref.append([p for word in reference for p in word if p != SIL])
         sentence_hyp.append([p for word in predicted for p in word if p != SIL])
         for token, ref, hyp in zip(words, reference, predicted):
@@ -179,17 +175,19 @@ def calc_metrics(g2p: G2P, tokens: pd.DataFrame, lexicon: dict[str, Counter]) ->
 
 
 def test_g2p() -> None:
-    """Build the lexicon from `train` and score the module on both folds."""
+    """Строит лексикон из train и оценивает модуль на обоих фолдах."""
     tokens = load_tokens()
     train = tokens[tokens.set == 'train']
     test = tokens[tokens.set == 'test']
     print(f'train {len(train)} tokens / test {len(test)} tokens')
 
     lexicon = build_lexicon(train)
+    mfa = load_mfa_dict()
     print(f'lexicon: {len(lexicon)} types, '
           f'{sum(1 for c in lexicon.values() if len(c) > 1)} with several pronunciations')
+    print(f'MFA dict: {len(mfa)} words')
 
-    g2p = G2P(lexicon)
+    g2p = G2P(lexicon, mfa)
 
     print('\nCalculate metrics, training fold:')
     calc_metrics(g2p, train, lexicon)

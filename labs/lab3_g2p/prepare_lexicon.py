@@ -30,7 +30,7 @@ from collections import Counter, defaultdict
 from praatio import textgrid
 import tqdm
 
-ALIGN_DIR = '../../data/RUSLAN_22050_align_v2/'
+ALIGN_DIR = '../../data/RUSLAN_align_v2/'
 NORMALIZED_META = '../../data/metadata_RUSLAN_22200_normalized.csv'
 TOKENS_PATH = 'data/tokens_phones.csv'
 TOKENS_SIL_PATH = 'data/tokens_phones_sil.csv'

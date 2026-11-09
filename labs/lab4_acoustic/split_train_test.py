@@ -7,7 +7,6 @@ def split(src: Path, dst_dir: Path, stem: str) -> tuple[int, int]:
             cols = line.rstrip("\n").split("|")
             if len(cols) < 3:
                 continue
-            # id has form 000020_RUSLAN -> take leading digits
             digits = cols[0].split("_")[0]
             if not digits.isdigit():
                 continue

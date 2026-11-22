@@ -54,7 +54,7 @@ def main():
     train_json = MANIFESTS / "train.json"
     valid_json = MANIFESTS / "valid.json"
     if not train_json.is_file() or not valid_json.is_file():
-        raise SystemExit("Сначала запусти prepare_manifests.py.")
+        raise SystemExit("Сначала prepare_manifests.py.")
 
     run_dir = args.run_dir.resolve()
     overrides = {

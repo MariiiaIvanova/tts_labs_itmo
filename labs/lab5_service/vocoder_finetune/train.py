@@ -47,10 +47,8 @@ class HifiGanBrain(sb.Brain):
         x, _ = batch.mel
         y, _ = batch.sig
 
-        # generate synthesized waveforms
         y_g_hat = self.modules.generator(x)[:, :, : y.size(2)]
 
-        # get scores and features from discriminator for real and synthesized waveforms
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat.detach())
         scores_real, feats_real = self.modules.discriminator(y)
 
@@ -62,12 +60,8 @@ class HifiGanBrain(sb.Brain):
         x, _ = batch.mel
         y, _ = batch.sig
 
-        # Hold on to the batch for the inference sample. This is needed because
-        # the inference sample is run from on_stage_end only, where
-        # batch information is not available
         self.last_batch = (x, y)
 
-        # Hold on to a sample (for logging)
         self._remember_sample(self.last_batch, predictions)
 
         y_hat, scores_fake, feats_fake, scores_real, feats_real = predictions
@@ -87,23 +81,19 @@ class HifiGanBrain(sb.Brain):
 
         outputs = self.compute_forward(batch, sb.core.Stage.TRAIN)
         (y_g_hat, scores_fake, feats_fake, scores_real, feats_real) = outputs
-        # calculate discriminator loss with the latest updated generator
         loss_d = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)[
             "D_loss"
         ]
-        # First train the discriminator
         self.optimizer_d.zero_grad()
         loss_d.backward()
         self.optimizer_d.step()
 
-        # calculate generator loss with the latest updated discriminator
         scores_fake, feats_fake = self.modules.discriminator(y_g_hat)
         scores_real, feats_real = self.modules.discriminator(y)
         outputs = (y_g_hat, scores_fake, feats_fake, scores_real, feats_real)
         loss_g = self.compute_objectives(outputs, batch, sb.core.Stage.TRAIN)[
             "G_loss"
         ]
-        # Then train the generator
         self.optimizer_g.zero_grad()
         loss_g.backward()
         self.optimizer_g.step()
@@ -180,18 +170,16 @@ class HifiGanBrain(sb.Brain):
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a stage (TRAIN, VALID, Or TEST)"""
         if stage == sb.Stage.VALID:
-            # Update learning rate
             self.scheduler_g.step()
             self.scheduler_d.step()
             lr_g = self.optimizer_g.param_groups[-1]["lr"]
             lr_d = self.optimizer_d.param_groups[-1]["lr"]
 
-            self.hparams.train_logger.log_stats(  # 1#2#
+            self.hparams.train_logger.log_stats(
                 stats_meta={"Epoch": epoch, "lr_g": lr_g, "lr_d": lr_d},
                 train_stats=self.last_loss_stats[sb.Stage.TRAIN],
                 valid_stats=self.last_loss_stats[sb.Stage.VALID],
             )
-            # The tensorboard_logger writes a summary to stdout and to the logfile.
             if self.hparams.use_tensorboard:
                 self.tensorboard_logger.log_stats(
                     stats_meta={"Epoch": epoch, "lr_g": lr_g, "lr_d": lr_d},
@@ -199,7 +187,6 @@ class HifiGanBrain(sb.Brain):
                     valid_stats=self.last_loss_stats[sb.Stage.VALID],
                 )
 
-            # Save the current checkpoint and delete previous checkpoints.
             epoch_metadata = {
                 **{"epoch": epoch},
                 **self.last_loss_stats[sb.Stage.VALID],
@@ -223,9 +210,8 @@ class HifiGanBrain(sb.Brain):
 
             self.run_inference_sample("Valid")
 
-        # We also write statistics about test data to stdout and to the torch.TensorboardLogger.
         if stage == sb.Stage.TEST:
-            self.hparams.train_logger.log_stats(  # 1#2#
+            self.hparams.train_logger.log_stats(
                 {"Epoch loaded": self.hparams.epoch_counter.current},
                 test_stats=self.last_loss_stats[sb.Stage.TEST],
             )
@@ -245,8 +231,6 @@ class HifiGanBrain(sb.Brain):
                 return
             x, y = self.last_batch
 
-            # Preparing model for inference by removing weight norm
-            # inference_generator = copy.deepcopy(self.hparams.generator)
             inference_generator = type(self.hparams.generator)(
                 in_channels=self.hparams.in_channels,
                 out_channels=self.hparams.out_channels,
@@ -261,10 +245,10 @@ class HifiGanBrain(sb.Brain):
                 conv_post_bias=self.hparams.conv_post_bias,
             ).to(
                 self.device
-            )  # Gets a new instance
+            )
             inference_generator.load_state_dict(
                 self.hparams.generator.state_dict()
-            )  # Copies weights
+            )
             inference_generator.remove_weight_norm()
             sig_out = inference_generator.inference(x)
             spec_out = self.hparams.mel_spectogram(
@@ -282,7 +266,6 @@ class HifiGanBrain(sb.Brain):
             self.tensorboard_logger.log_figure(f"{name}/mel_target", x)
             self.tensorboard_logger.log_figure(f"{name}/mel_pred", spec_out)
         else:
-            # folder name is the current epoch for validation and "test" for test
             folder = (
                 self.hparams.epoch_counter.current
                 if name == "Valid"
@@ -322,7 +305,6 @@ def dataio_prepare(hparams):
     """
     segment_size = hparams["segment_size"]
 
-    # Define audio pipeline:
     @sb.utils.data_pipeline.takes("wav", "segment")
     @sb.utils.data_pipeline.provides("mel", "sig")
     def audio_pipeline(wav, segment):
@@ -361,13 +343,11 @@ def dataio_prepare(hparams):
 
 
 if __name__ == "__main__":
-    # Load hyperparameters file with command-line overrides
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
 
     with open(hparams_file, encoding="utf-8") as fin:
         hparams = load_hyperpyyaml(fin, overrides)
 
-    # Create experiment directory
     sb.create_experiment_directory(
         experiment_directory=hparams["output_folder"],
         hyperparams_to_save=hparams_file,
@@ -393,7 +373,6 @@ if __name__ == "__main__":
 
     datasets = dataio_prepare(hparams)
 
-    # Brain class initialization
     hifi_gan_brain = HifiGanBrain(
         modules=hparams["modules"],
         opt_class=[
@@ -414,7 +393,6 @@ if __name__ == "__main__":
             )
         )
 
-    # Training
     hifi_gan_brain.fit(
         hifi_gan_brain.hparams.epoch_counter,
         train_set=datasets["train"],
@@ -423,7 +401,6 @@ if __name__ == "__main__":
         valid_loader_kwargs=hparams["valid_dataloader_opts"],
     )
 
-    # Test
     if "test" in datasets:
         hifi_gan_brain.evaluate(
             datasets["test"],

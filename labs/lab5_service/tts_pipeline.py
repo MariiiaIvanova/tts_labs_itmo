@@ -5,8 +5,7 @@ Assembles labs 1–4 plus a pretrained vocoder into one callable::
     pipeline = TTSPipeline(run_dir='../lab4_acoustic/runs/baseline')
     wav, timings = pipeline('Здравствуйте, ваш заказ готов.')
 
-The back half — acoustic model and vocoder — is provided and works. The four hooks marked
-`TODO` are where your own modules from labs 1–3 plug in.
+The back half — acoustic model and vocoder — is provided and works. The four hooks marked are where your own modules from labs 1–3 plug in.
 
 Stage order::
 
@@ -31,6 +30,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+LABS_DIR = Path(__file__).resolve().parent.parent
+
+WORD_RE = re.compile(r"(?:[^\W_]|\u0301)+(?:-(?:[^\W_]|\u0301)+)*")
 
 SIL = '<SIL>'
 SAMPLE_RATE = 22050
@@ -133,6 +136,9 @@ class TTSPipeline:
         from TTS.tts.models.forward_tts import ForwardTTS
         from TTS.tts.utils.text.tokenizer import TTSTokenizer
         from TTS.utils.audio import AudioProcessor
+        from lab1_text.text_normalizer import TextNormalizer
+        from lab2_pauses.pause_predictor import PausePredictor, _init_nlp
+        from lab3_g2p.g2p import G2P, build_lexicon, load_mfa_dict, load_tokens
 
         self.device = device
         run_dir = Path(run_dir)
@@ -160,38 +166,72 @@ class TTSPipeline:
             run_opts={'device': device},
         )
         self.phone_set = set(self.config.characters.characters)
+        self.normalizer = TextNormalizer()
+
+        pause_model = LABS_DIR / "lab2_pauses" / "models" / "pause_model.pt"
+        self.pause_predictor = PausePredictor(model_path=str(pause_model))
+        self.pause_predictor.device = torch.device("cpu")
+        self.pause_predictor.load()
+        _init_nlp()
+
+        g2p_data = LABS_DIR / "lab3_g2p" / "data"
+        rows = load_tokens(str(g2p_data / "tokens_phones.csv"))
+        train_rows = rows.loc[rows["set"] == "train"]
+        self.g2p = G2P(
+            lexicon=build_lexicon(train_rows),
+            mfa_dict=load_mfa_dict(str(g2p_data / "russian_mfa_norm.dict")),
+        )
 
     # ---------------------------------------------------------------- front end (yours)
     def normalize(self, text: str) -> str:
-        """Normalize the input. **TODO: your lab 1 normalizer.**"""
-        raise NotImplementedError('lab 1 normalizer')
+        text = unicodedata.normalize("NFC", text)
+        return unicodedata.normalize("NFC", self.normalizer.normalize(text))
 
     def tokenize(self, text: str) -> list[str]:
-        """Split into tokens carrying their trailing punctuation. **TODO: your lab 2.**
+        words = list(WORD_RE.finditer(text))
+        ends = [word.start() for word in words[1:]] + [len(text)]
+        return [
+            word.group() + text[word.end():end].strip()
+            for word, end in zip(words, ends)
+        ]
+    
+    def insert_pauses(
+        self, tokens: list[str], requests: dict[int, str] | None = None
+    ) -> list[str]:
+        import torch
 
-        The pause predictor was trained on `label_raw`, so the tokens here must have the
-        same shape: a word plus the punctuation up to the next word.
-        """
-        raise NotImplementedError('lab 2 tokenizer')
+        if not tokens:
+            return []
 
-    def insert_pauses(self, tokens: list[str],
-                      requests: dict[int, str] | None = None) -> list[str]:
-        """Return the token sequence with `<SIL>` where a pause belongs. **TODO: lab 2.**
+        with torch.inference_mode():
+            flags, _ = self.pause_predictor.predict(tokens)
 
-        `requests` is empty on the required path. For extra task 1 it carries the output of
-        :func:`strip_markup`: `'normal'` forces a `<SIL>` after that token, `'none'`
-        suppresses one.
-        """
-        raise NotImplementedError('lab 2 pause predictor')
+        result = []
+        for token, has_pause in zip(tokens, flags):
+            result.append(token)
+            if has_pause:
+                result.append(SIL)
+        return result
 
     def to_phones(self, tokens: list[str]) -> list[str]:
-        """Token sequence to flat phone sequence. **TODO: your lab 3.**
+        """Convert tokens to a flat phoneme sequence, preserving `<SIL>`."""
+        keys = []
+        for token in tokens:
+            if token == SIL:
+                keys.append(SIL)
+                continue
 
-        `<SIL>` maps to itself. Every output phone must be in `common/phones_mfa.txt`;
-        anything else becomes an unknown token in the acoustic model and is not reported.
-        """
-        raise NotImplementedError('lab 3 G2P')
+            word = WORD_RE.match(token)
+            if word is None:
+                raise ValueError(f"Не удалось выделить слово из токена {token!r}")
+            keys.append(lookup_key(word.group()))
 
+        phones = []
+        for key, pronunciation in zip(keys, self.g2p.transcribe(keys)):
+            if not pronunciation:
+                raise ValueError(f"Не удалось транскрибировать {key!r}")
+            phones.extend(pronunciation)
+        return phones
     # ------------------------------------------------------------- back end (provided)
     def mel(self, phones: list[str]) -> np.ndarray:
         """Phone sequence to mel spectrogram `[n_mels, T]`.

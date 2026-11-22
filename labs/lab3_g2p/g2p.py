@@ -20,7 +20,12 @@ import numpy as np
 import pandas as pd
 import tqdm
 
-from rules import transcribe_oov
+#from rules import transcribe_oov
+
+if __package__:
+    from .rules import transcribe_oov
+else:
+    from rules import transcribe_oov
 
 TOKENS_PHONES_DATA = 'data/tokens_phones.csv'
 LEXICON_PATH = 'data/lexicon.csv'
